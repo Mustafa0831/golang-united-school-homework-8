@@ -11,227 +11,233 @@ import (
 	"os"
 )
 
+type Arguments map[string]string
+
 type User struct {
-	Id    string `json:"id"`
-	Email string `json:"email"`
+	ID    string `json:"id"`
+	Email string `json :"email"`
 	Age   int    `json:"age"`
 }
 
 func (u *User) String() string {
-	if u.IsEmpty() {
+	if len(u.ID) == 0 {
 		return ""
-
 	}
-	b, _ := json.Marshal(*u)
-	return string(b)
-}
 
-func (u *User) Marshal() ([]byte, error) {
-	return json.Marshal(*u)
+	data, _ := json.Marshal(&u)
+
+	return string(data)
 }
 
 func (u *User) Set(s string) error {
 	return json.Unmarshal([]byte(s), u)
 }
 
-func (u *User) IsEmpty() bool {
-	return len(u.Id) == 0
-}
-
-type Arguments map[string]string
-
 func parseArgs() Arguments {
 	var user User
 	var operation, fileName, id string
+
 	flag.StringVar(&operation, "operation", "", `-operation "add"`)
 	flag.Var(&user, "item", `-item {id: "1", email: «test@test.com», age: 31}`)
 	flag.StringVar(&fileName, "fileName", "", `-fileName "users.json"`)
 	flag.StringVar(&id, "id", "", `-id "2"`)
+
 	flag.Parse()
 
-	args := Arguments{}
-	args["operation"] = operation
-	args["item"] = user.String()
-	args["fileName"] = fileName
-	args["id"] = id
-	return args
+	return Arguments{
+		"operation": operation,
+		"item":      user.String(),
+		"fileName":  fileName,
+		"id":        id,
+	}
 }
 
-func fileOpen(fName, op string) (f *os.File, users []User, err error) {
-	switch op {
-	case "add", "remove":
-		f, err = os.OpenFile(fName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-		if err != nil {
-			return nil, users, fmt.Errorf("can't open file [%s], error: %w", fName, err)
+func Perform(args Arguments, writer io.Writer) error {
+	f := args["fileName"]
+	if f == "" {
+		return errors.New("-fileName flag has to be specified")
+	}
+
+	o := args["operation"]
+	if o == "" {
+		return errors.New("-operation flag has to be specified")
+	}
+
+	switch o {
+	case "add":
+		i := args["item"]
+
+		if i == "" {
+			return errors.New("-item flag has to be specified")
 		}
-	case "findById", "list":
-		f, err = os.OpenFile(fName, os.O_RDONLY|os.O_CREATE, 0644)
+
+		u := User{}
+		u.Set(i)
+
+		file, users, err := fileOpen(f, "findById")
 		if err != nil {
-			return nil, users, fmt.Errorf("can't open file [%s], error: %w", fName, err)
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+		defer file.Close()
+
+		_, index := findById(users, u.ID)
+		if index == -1 {
+			fmt.Fprintf(writer, "Item with id %s already exists", u.ID)
+			return nil
+		}
+
+		file, _, err = fileOpen(f, o)
+		if err != nil {
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+
+		err = addUser(users, u, file)
+		if err != nil {
+			return fmt.Errorf("add user error: %w", err)
+		}
+
+	case "list":
+		file, us, err := fileOpen(f, o)
+		if err != nil {
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+		defer file.Close()
+
+		err = getAllUsers(us, writer)
+		if err !=nil{
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+	case "findById":
+		i := args["id"]
+		if len(i) == 0 {
+			return errors.New("-id flag has to be specified")
+		}
+
+		file, us, err := fileOpen(f, o)
+		if err != nil {
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+		defer file.Close()
+
+		u, _ := findById(us, i)
+		_, err = writer.Write(u)
+		if err != nil {
+			return fmt.Errorf("write error: %w", err)
+		}
+	case "remove":
+		i := args["id"]
+		if len(i) == 0 {
+			return errors.New("-id flag has to be specified")
+		}
+
+		file, us, err := fileOpen(f, "findById")
+		if err != nil {
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+
+		_, index := findById(us, i)
+		defer file.Close()
+		if index == -1 {
+			fmt.Fprintf(writer, "Item with id %s not found", i)
+			return nil
+		}
+
+		file, _, err = fileOpen(f, o)
+		if err != nil {
+			return fmt.Errorf("can't open file [%s], error: %w", f, err)
+		}
+		err = removeUser(us, index, file)
+		if err != nil {
+			return fmt.Errorf("remove user error: %w", err)
 		}
 	default:
-		return nil, users, fmt.Errorf("Operation %s not allowed!", op)
+		return fmt.Errorf("Operation %s not allowed!", o)
+	}
+	return nil
+}
+
+func getAllUsers(us []User, wr io.Writer) error {
+	data, err := json.Marshal(&us)
+	if err != nil {
+		return fmt.Errorf("marshal error: %w", err)
 	}
 
-	body, err := ioutil.ReadAll(f)
-	if err != nil && err != io.EOF {
-		return nil, users, fmt.Errorf("can't open file [%s] error: %w", fName, err)
+	_, err = wr.Write(data)
+	if err != nil {
+		return fmt.Errorf("write error: %w", err)
+	}
+	return nil
+}
+
+func removeUser(us []User, index int, file io.Writer) error {
+	us[index] = us[len(us)-1]
+	us = us[:len(us)-1]
+	data, err := json.Marshal(&us)
+	if err != nil {
+		return fmt.Errorf("marshal error: %w", err)
 	}
 
-	if len(body) > 0 {
-		err = json.Unmarshal(body, &users)
-		if err != nil {
-			return nil, users, fmt.Errorf("unmarshal error: %w", err)
-		}
+	_, err = file.Write(data)
+	if err != nil {
+		return fmt.Errorf("write error: %w", err)
 	}
-	return
+	return nil
 }
 
 func findById(users []User, id string) ([]byte, int) {
 	for i, user := range users {
-		if user.Id == id {
-			js, err := user.Marshal()
+		if user.ID == id {
+			jsn, err := json.Marshal(&user)
 			if err != nil {
 				continue
 			}
-			return js, i
+			return jsn, i
 		}
 	}
 	return []byte(""), -1
 }
 
-func addUser(users []User, user User, w io.Writer) error {
-	users = append(users, user)
-	b, err := json.Marshal(&users)
+func addUser(us []User, u User, w io.Writer) error {
+	us = append(us, u)
+	data, err := json.Marshal(&us)
 	if err != nil {
 		return fmt.Errorf("marshal error: %w", err)
 	}
-	_, err = w.Write(b)
+
+	_, err = w.Write(data)
 	if err != nil {
 		return fmt.Errorf("write error: %w", err)
 	}
 	return nil
 }
 
-func removeUser(users []User, i int, w io.Writer) error {
-	users[i] = users[len(users)-1]
-	users = users[:len(users)-1]
-	b, err := json.Marshal(&users)
-	if err != nil {
-		return fmt.Errorf("marshal error: %w", err)
-	}
-	_, err = w.Write(b)
-	if err != nil {
-		return fmt.Errorf("write error: %w", err)
-	}
-	return nil
-}
+func fileOpen(fileName string, operation string) (f *os.File, users []User, err error) {
+	switch operation {
+	case "add", "remove":
+		if f, err = os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644); err != nil {
+			return nil, users, fmt.Errorf("can't open file [%s], error: %w", fileName, err)
+		}
 
-func getAllUsers(users []User, w io.Writer) error {
-	b, err := json.Marshal(&users)
-	if err != nil {
-		return fmt.Errorf("marshal error: %w", err)
-	}
-	_, err = w.Write(b)
-	if err != nil {
-		return fmt.Errorf("write error: %w", err)
-	}
-	return nil
-}
-
-func Perform(args Arguments, writer io.Writer) error {
-	fName := args["fileName"]
-	if len(fName) == 0 {
-		return errors.New("-fileName flag has to be specified")
-	}
-
-	op := args["operation"]
-	if len(op) == 0 {
-		return errors.New("-operation flag has to be specified")
-	}
-
-	switch op {
-	case "add":
-		item := args["item"]
-		if len(item) == 0 {
-			return errors.New("-item flag has to be specified")
-		}
-		user := User{}
-		user.Set(item)
-		f, users, err := fileOpen(fName, "findById")
-		if err != nil {
-			return fmt.Errorf("can't open file [%s], error: %w", fName, err)
-		}
-		f.Close()
-		_, idx := findById(users, user.Id)
-		if idx != -1 {
-			fmt.Fprintf(writer, "Item with id %s already exists", user.Id)
-			return nil
-		}
-		f, _, err = fileOpen(fName, op)
-		if err != nil {
-			return fmt.Errorf("can't open file [%s], error: %w", fName, err)
-		}
-		defer f.Close()
-		err = addUser(users, user, f)
-		if err != nil {
-			return fmt.Errorf("add user error: %w", err)
-		}
-	case "remove":
-		id := args["id"]
-		if len(id) == 0 {
-			return errors.New("-id flag has to be specified")
-		}
-		f, users, err := fileOpen(fName, "findById")
-		if err != nil {
-			return fmt.Errorf("can't open file [%s], error: %w", fName, err)
-		}
-		_, idx := findById(users, id)
-		f.Close()
-		if idx == -1 {
-			fmt.Fprintf(writer, "Item with id %s not found", id)
-			return nil
-		}
-		f, _, err = fileOpen(fName, op)
-		if err != nil {
-			return fmt.Errorf("can't open file [%s], error: %w", fName, err)
-		}
-		defer f.Close()
-		err = removeUser(users, idx, f)
-		if err != nil {
-			return fmt.Errorf("remove user error: %w", err)
-		}
-	case "list":
-		f, users, err := fileOpen(fName, op)
-		if err != nil {
-			return fmt.Errorf("can't open file [%s], error: %w", fName, err)
-		}
-		f.Close()
-		err = getAllUsers(users, writer)
-		if err != nil {
-			return fmt.Errorf("list users error: %w", err)
-		}
-	case "findById":
-		id := args["id"]
-		if len(id) == 0 {
-			return errors.New("-id flag has to be specified")
-		}
-		f, users, err := fileOpen(fName, op)
-		if err != nil {
-			return fmt.Errorf("can't open file [%s], error: %w", fName, err)
-		}
-		f.Close()
-		user, _ := findById(users, id)
-		_, err = writer.Write(user)
-		if err != nil {
-			return fmt.Errorf("write error: %w", err)
+	case "findById", "list":
+		if f, err = os.OpenFile(fileName, os.O_RDONLY|os.O_CREATE, 0644); err != nil {
+			return nil, users, fmt.Errorf("can't open file [%s], error: %w", fileName, err)
 		}
 	default:
-		return fmt.Errorf("Operation %s not allowed!", op)
+		return nil, users, fmt.Errorf("Operation %s not allowed!", operation)
 	}
-	return nil
-}
 
+	body, err := ioutil.ReadAll(f)
+	if err != nil && err != io.EOF {
+		return nil, users, fmt.Errorf("can't open file [%s], error: %w", fileName, err)
+	}
+
+	if len(body) > 0 {
+		if err = json.Unmarshal(body, &users); err != nil {
+			return nil, users, fmt.Errorf("unmarshal error: %w", err)
+		}
+	}
+	return
+}
 
 func main() {
 	err := Perform(parseArgs(), os.Stdout)
